@@ -274,4 +274,102 @@
     (map-get? bug-reports id)
 )
 
+;; Finalize AI assessment (Last feature, lengthy)
+;; This function processes the AI's analysis of a bug report.
+;; It validates the AI's authority, checks the report status,
+;; calculates a dynamic bounty based on severity and confidence score,
+;; updates the report record, manages the staked amount (return or burn),
+;; updates the reporter's reputation, and emits detailed event logs.
+;;
+;; This function is critical as it serves as the bridge between off-chain AI
+;; intelligence and on-chain value transfer.
+(define-public (finalize-ai-assessment (report-id uint) (severity (string-ascii 20)) (score uint))
+    (let
+        (
+            ;; Retrieve the existing report
+            (report-data (unwrap! (map-get? bug-reports report-id) ERR-NOT-FOUND))
+            (caller tx-sender)
+            (reporter (get reporter report-data))
+            (staked (get staked-amount report-data))
+        )
+        ;; 1. verification: ensure caller is an authorized AI auditor
+        ;; Only authorized AIs can call this to prevent manipulation
+        (asserts! (is-ai-auditor caller) ERR-UNAUTHORIZED-AI)
+
+        ;; 2. validation: ensure report is still pending
+        ;; Can only access pending reports to avoid overwriting finalized state
+        (asserts! (is-eq (get status report-data) "pending") ERR-ALREADY-PROCESSED)
+
+        ;; 3. validation: ensure score is valid (0-100)
+        (asserts! (<= score u100) ERR-INVALID-SCORE)
+
+        ;; 4. logic: calculate dynamic bounty and status
+        ;; Base bounty depends on severity level
+        (let
+            (
+                (base-reward 
+                    (if (is-eq severity "critical") u1000 
+                    (if (is-eq severity "high") u500 
+                    (if (is-eq severity "medium") u200 u50)))
+                )
+                ;; Bonus multiplier based on AI confidence score
+                ;; Higher confidence = Higher Payout
+                (confidence-multiplier (/ (* base-reward score) u100))
+                (final-bounty (+ base-reward confidence-multiplier))
+                
+                ;; Determine status based on score threshold (e.g., > 70 is verified)
+                ;; Below 70 is automatically rejected unless appealed
+                (is-verified (> score u70))
+                (new-status (if is-verified "verified" "rejected"))
+            )
+            
+            ;; 5. logic: handle staking and reputation
+            (if is-verified
+                (begin
+                    ;; Return stake to reporter
+                    (try! (return-stake reporter staked))
+                    ;; Update reputation positively
+                    (update-reputation reporter true)
+                    ;; Track total payouts
+                    (var-set total-bounties-paid (+ (var-get total-bounties-paid) final-bounty))
+                )
+                (begin
+                    ;; Burn stake (or keep in contract)
+                    ;; This disincentivizes spam reports
+                    (try! (burn-stake staked))
+                    ;; Update reputation negatively
+                    (update-reputation reporter false)
+                )
+            )
+
+            ;; 6. persistence: update the report with final assessment
+            (map-set bug-reports report-id (merge report-data {
+                severity: severity,
+                status: new-status,
+                ai-score: score,
+                bounty: (if is-verified final-bounty u0)
+            }))
+
+            ;; 7. event: emit detailed logging for off-chain indexing
+            ;; This event is critical for the frontend to update UI
+            ;; and for the AI agent to confirm its action was recorded.
+            (print {
+                event: "ai-assessment-finalized",
+                report-id: report-id,
+                auditor: caller,
+                reporter: reporter,
+                assessed-severity: severity,
+                confidence-score: score,
+                final-status: new-status,
+                payout-amount: (if is-verified final-bounty u0),
+                stake-returned: is-verified,
+                timestamp: block-height
+            })
+
+            ;; 8. return: success with new status
+            (ok new-status)
+        )
+    )
+)
+
 
